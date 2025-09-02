@@ -56,4 +56,5 @@ def go():
         return render_template_string(TEMPLATE, html=f"Error: {e}")
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    port = int(os.environ.get("PORT", 5000))  # use Render's port if provided
+    app.run(host="0.0.0.0", port=port, debug=True)
