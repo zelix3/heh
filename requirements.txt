@@ -1,4 +1,4 @@
 flask
-playwright==1.44.0
+playwright
 requests
 beautifulsoup4
