@@ -268,4 +268,4 @@ def on_screen_share_ice_candidate(data):
     }, room=room_id, include_self=False)
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, port=5000)
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
