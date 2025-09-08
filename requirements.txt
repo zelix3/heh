@@ -1,3 +1,6 @@
 flask
-selenium
-chromedriver-autoinstaller
+flask_socketio
+eventlet
+uuid
+requests
+werkzeug
