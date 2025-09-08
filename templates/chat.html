@@ -1,0 +1,426 @@
+{% extends "base.html" %}
+
+{% block title %}Chat - {{ username }}{% endblock %}
+
+{% block content %}
+<div class="row">
+    <!-- Users List -->
+    <div class="col-md-3">
+        <div class="card">
+            <div class="card-header">
+                <h5>Online Users</h5>
+            </div>
+            <div class="card-body">
+                <div id="usersList" class="user-list">
+                    <p class="text-muted">Loading users...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Chat Area -->
+    <div class="col-md-9">
+        <div id="publicChatArea" class="card">
+            <div class="card-header">
+                <h5>Welcome to the Chat Platform!</h5>
+            </div>
+            <div class="card-body">
+                <p>Select a user from the left panel to start a private conversation.</p>
+            </div>
+        </div>
+        
+        <!-- Private Chat Area (hidden by default) -->
+        <div id="privateChatArea" class="card" style="display: none;">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 id="privateChatTitle">Private Chat</h5>
+                <div>
+                    <button id="shareScreenBtn" class="btn btn-sm btn-primary me-2">Share Screen</button>
+                    <button id="stopScreenBtn" class="btn btn-sm btn-danger me-2" style="display: none;">Stop Sharing</button>
+                    <button id="closeChatBtn" class="btn btn-sm btn-secondary">Close Chat</button>
+                </div>
+            </div>
+            <div class="card-body">
+                <!-- Screen Share Area -->
+                <div id="screenShareContainer" class="screen-share-container" style="display: none;">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span id="screenShareStatus">Screen sharing active</span>
+                        <button id="stopViewingBtn" class="btn btn-sm btn-outline-secondary">Stop Viewing</button>
+                    </div>
+                    <video id="screenVideo" autoplay playsinline></video>
+                </div>
+                
+                <!-- Chat Messages -->
+                <div id="privateChatMessages" class="chat-container mb-3">
+                </div>
+                
+                <!-- Message Input -->
+                <div class="input-group">
+                    <input type="text" id="messageInput" class="form-control" placeholder="Type your message...">
+                    <button id="sendMessageBtn" class="btn btn-primary">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Incoming Chat Modal -->
+<div class="modal fade" id="chatInvitationModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Private Chat Invitation</h5>
+            </div>
+            <div class="modal-body">
+                <p id="invitationMessage"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Decline</button>
+                <button type="button" id="acceptChatBtn" class="btn btn-primary">Accept</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const socket = io();
+const username = '{{ username }}';
+let currentRoomId = null;
+let currentTargetUser = null;
+let localStream = null;
+let peerConnection = null;
+
+// WebRTC configuration
+const rtcConfig = {
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' }
+    ]
+};
+
+// DOM elements
+const usersList = document.getElementById('usersList');
+const publicChatArea = document.getElementById('publicChatArea');
+const privateChatArea = document.getElementById('privateChatArea');
+const privateChatMessages = document.getElementById('privateChatMessages');
+const privateChatTitle = document.getElementById('privateChatTitle');
+const messageInput = document.getElementById('messageInput');
+const sendMessageBtn = document.getElementById('sendMessageBtn');
+const shareScreenBtn = document.getElementById('shareScreenBtn');
+const stopScreenBtn = document.getElementById('stopScreenBtn');
+const closeChatBtn = document.getElementById('closeChatBtn');
+const screenShareContainer = document.getElementById('screenShareContainer');
+const screenVideo = document.getElementById('screenVideo');
+const stopViewingBtn = document.getElementById('stopViewingBtn');
+const chatInvitationModal = new bootstrap.Modal(document.getElementById('chatInvitationModal'));
+const invitationMessage = document.getElementById('invitationMessage');
+const acceptChatBtn = document.getElementById('acceptChatBtn');
+
+let pendingInvitation = null;
+
+// Socket event listeners
+socket.on('connect', function() {
+    console.log('Connected to server');
+    loadUsers();
+});
+
+socket.on('user_list_updated', function(data) {
+    updateUsersList(data.users.filter(user => user !== username));
+});
+
+socket.on('private_chat_invitation', function(data) {
+    pendingInvitation = data;
+    invitationMessage.textContent = `${data.from_user} wants to start a private chat with you.`;
+    chatInvitationModal.show();
+});
+
+socket.on('private_chat_started', function(data) {
+    openPrivateChat(data.target_user, data.room_id, data.messages);
+});
+
+socket.on('private_chat_messages', function(data) {
+    displayMessages(data.messages);
+});
+
+socket.on('private_message_received', function(data) {
+    displayMessage(data);
+});
+
+socket.on('screen_share_started', function(data) {
+    showScreenShareNotification(`${data.username} is sharing their screen`);
+});
+
+socket.on('screen_share_stopped', function(data) {
+    hideScreenShare();
+    showScreenShareNotification(`${data.username} stopped sharing their screen`);
+});
+
+socket.on('screen_share_offer_received', function(data) {
+    handleScreenShareOffer(data.offer, data.from_user);
+});
+
+socket.on('screen_share_answer_received', function(data) {
+    if (peerConnection) {
+        peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+    }
+});
+
+socket.on('screen_share_ice_candidate_received', function(data) {
+    if (peerConnection) {
+        peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+    }
+});
+
+// Load users
+function loadUsers() {
+    fetch('/users')
+        .then(response => response.json())
+        .then(data => {
+            if (data.users) {
+                updateUsersList(data.users);
+            }
+        });
+}
+
+// Update users list
+function updateUsersList(users) {
+    usersList.innerHTML = '';
+    if (users.length === 0) {
+        usersList.innerHTML = '<p class="text-muted">No other users online</p>';
+        return;
+    }
+    
+    users.forEach(user => {
+        const userElement = document.createElement('div');
+        userElement.className = 'border-bottom py-2';
+        userElement.innerHTML = `
+            <div class="d-flex justify-content-between align-items-center">
+                <span>${user}</span>
+                <button class="btn btn-sm btn-outline-primary start-chat-btn" data-username="${user}">
+                    Chat
+                </button>
+            </div>
+        `;
+        usersList.appendChild(userElement);
+    });
+    
+    // Add click listeners to chat buttons
+    document.querySelectorAll('.start-chat-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            startPrivateChat(this.dataset.username);
+        });
+    });
+}
+
+// Start private chat
+function startPrivateChat(targetUser) {
+    socket.emit('start_private_chat', { target_user: targetUser });
+}
+
+// Accept chat invitation
+acceptChatBtn.addEventListener('click', function() {
+    if (pendingInvitation) {
+        socket.emit('join_private_chat', { room_id: pendingInvitation.room_id });
+        openPrivateChat(pendingInvitation.from_user, pendingInvitation.room_id, []);
+        chatInvitationModal.hide();
+        pendingInvitation = null;
+    }
+});
+
+// Open private chat
+function openPrivateChat(targetUser, roomId, messages) {
+    currentTargetUser = targetUser;
+    currentRoomId = roomId;
+    
+    publicChatArea.style.display = 'none';
+    privateChatArea.style.display = 'block';
+    privateChatTitle.textContent = `Private Chat with ${targetUser}`;
+    
+    displayMessages(messages);
+}
+
+// Display messages
+function displayMessages(messages) {
+    privateChatMessages.innerHTML = '';
+    messages.forEach(message => {
+        displayMessage(message);
+    });
+}
+
+// Display single message
+function displayMessage(messageData) {
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `message ${messageData.username === username ? 'own' : 'other'}`;
+    messageDiv.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+            <div>
+                <strong>${messageData.username}</strong>: ${messageData.message}
+            </div>
+            <small class="text-muted">${messageData.timestamp}</small>
+        </div>
+    `;
+    privateChatMessages.appendChild(messageDiv);
+    privateChatMessages.scrollTop = privateChatMessages.scrollHeight;
+}
+
+// Send message
+function sendMessage() {
+    const message = messageInput.value.trim();
+    if (message && currentRoomId) {
+        socket.emit('private_message', {
+            room_id: currentRoomId,
+            message: message
+        });
+        messageInput.value = '';
+    }
+}
+
+// Event listeners
+sendMessageBtn.addEventListener('click', sendMessage);
+messageInput.addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') {
+        sendMessage();
+    }
+});
+
+closeChatBtn.addEventListener('click', function() {
+    privateChatArea.style.display = 'none';
+    publicChatArea.style.display = 'block';
+    currentRoomId = null;
+    currentTargetUser = null;
+    stopScreenSharing();
+});
+
+// Screen sharing functionality
+shareScreenBtn.addEventListener('click', startScreenSharing);
+stopScreenBtn.addEventListener('click', stopScreenSharing);
+stopViewingBtn.addEventListener('click', function() {
+    hideScreenShare();
+});
+
+async function startScreenSharing() {
+    try {
+        localStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: true
+        });
+        
+        shareScreenBtn.style.display = 'none';
+        stopScreenBtn.style.display = 'inline-block';
+        
+        // Notify others about screen sharing
+        socket.emit('start_screen_share', { room_id: currentRoomId });
+        
+        // Set up WebRTC connection
+        await setupWebRTCConnection();
+        
+        // Handle stream end
+        localStream.getVideoTracks()[0].addEventListener('ended', () => {
+            stopScreenSharing();
+        });
+        
+    } catch (error) {
+        console.error('Error starting screen share:', error);
+        alert('Failed to start screen sharing. Please make sure you grant permission.');
+    }
+}
+
+function stopScreenSharing() {
+    if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+    }
+    
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+    
+    shareScreenBtn.style.display = 'inline-block';
+    stopScreenBtn.style.display = 'none';
+    
+    socket.emit('stop_screen_share', { room_id: currentRoomId });
+}
+
+async function setupWebRTCConnection() {
+    peerConnection = new RTCPeerConnection(rtcConfig);
+    
+    // Add local stream to peer connection
+    localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStream);
+    });
+    
+    // Handle ICE candidates
+    peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+            socket.emit('screen_share_ice_candidate', {
+                room_id: currentRoomId,
+                candidate: event.candidate
+            });
+        }
+    };
+    
+    // Create offer
+    const offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
+    
+    socket.emit('screen_share_offer', {
+        room_id: currentRoomId,
+        offer: offer
+    });
+}
+
+async function handleScreenShareOffer(offer, fromUser) {
+    if (!peerConnection) {
+        peerConnection = new RTCPeerConnection(rtcConfig);
+        
+        // Handle remote stream
+        peerConnection.ontrack = (event) => {
+            screenVideo.srcObject = event.streams[0];
+            showScreenShare();
+        };
+        
+        // Handle ICE candidates
+        peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.emit('screen_share_ice_candidate', {
+                    room_id: currentRoomId,
+                    candidate: event.candidate
+                });
+            }
+        };
+    }
+    
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    
+    socket.emit('screen_share_answer', {
+        room_id: currentRoomId,
+        answer: answer,
+        target_user: fromUser
+    });
+}
+
+function showScreenShare() {
+    screenShareContainer.style.display = 'block';
+}
+
+function hideScreenShare() {
+    screenShareContainer.style.display = 'none';
+    if (screenVideo.srcObject) {
+        screenVideo.srcObject.getTracks().forEach(track => track.stop());
+        screenVideo.srcObject = null;
+    }
+    if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+    }
+}
+
+function showScreenShareNotification(message) {
+    // You could implement a toast notification here
+    console.log(message);
+}
+</script>
+{% endblock %}
